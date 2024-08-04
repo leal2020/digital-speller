@@ -31,6 +31,8 @@ import './index.css';
 
 import { createRoot } from 'react-dom/client';
 import ChartExample from './ChartExample';
+import Container from './components/Container';
+import SelectType from './pages/SelectType';
 const container = document.getElementById('app');
 const root = createRoot(container);
-root.render(<ChartExample />);
+root.render(<SelectType />);

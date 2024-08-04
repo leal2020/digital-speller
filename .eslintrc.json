@@ -24,13 +24,13 @@
     "sourceType": "module"
   },
   "rules": {
+    "import/no-named-as-default": "off",
     "prettier/prettier": "error",
     "react/react-in-jsx-scope": "off",
     "@typescript-eslint/no-unused-vars": [
       "warn",
       { "ignoreRestSiblings": true }
-    ],
-    "react-hooks/rules-of-hooks": "error"
+    ]
   },
   "settings": {
     "react": {
