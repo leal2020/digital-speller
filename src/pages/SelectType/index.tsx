@@ -1,18 +1,19 @@
 import React from 'react';
 import Typography from '../../components/Typography';
 import Button from '../../components/Button';
+import * as S from './styles';
 
 const SelectType = () => {
   return (
-    <React.Fragment>
+    <S.MainContainer>
       <Typography variant="h1">Soletrador digital</Typography>
       <Button background="blue" size="large" style="filled">
         Treinamento
       </Button>
-      <Button background="blue" size="small" style="filled">
-        Treinamento
+      <Button background="blue" size="large" style="filled">
+        Teste
       </Button>
-    </React.Fragment>
+    </S.MainContainer>
   );
 };
 

@@ -9,10 +9,10 @@ type ButtonProps = {
   size: 'small' | 'large';
 };
 
-const Button = ({ background, style, size }: ButtonProps) => {
+const Button = ({ children, background, style, size }: ButtonProps) => {
   return (
     <S.ButtonElement $background={background} $buttonStyle={style} $size={size}>
-      teste
+      {children}
     </S.ButtonElement>
   );
 };
