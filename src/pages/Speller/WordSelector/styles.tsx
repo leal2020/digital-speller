@@ -10,6 +10,19 @@ export const Container = styled.div`
   gap: 24px;
 `;
 
+export const ContainerHeader = styled.div`
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+`;
+
+export const InputConfig = styled.div`
+  display: flex;
+  flex-direction: column;
+`;
+
 export const WordGrid = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

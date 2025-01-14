@@ -8,4 +8,5 @@ export const Container = styled.div`
   align-items: flex-start;
   justify-content: flex-start;
   gap: 8px;
+  position: relative;
 `;
