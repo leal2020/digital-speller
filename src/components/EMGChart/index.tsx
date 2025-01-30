@@ -20,18 +20,29 @@ const EMGChart = () => {
     socket.on('serial:data', (newData: string) => {
       const numericValue = parseFloat(newData);
       const newTimestamp = Date.now();
+      const formattedTimestamp = new Date(newTimestamp)
+        .toISOString()
+        .slice(11, 23);
 
       setChartData((prevData) => {
         const updatedData = [
           ...prevData,
-          { value: numericValue, timestamp: newTimestamp },
+          {
+            value: numericValue,
+            timestamp: newTimestamp,
+            formattedTime: formattedTimestamp,
+          },
         ];
 
         // Keep only the last N data points to avoid excessive memory usage
         return updatedData.slice(-100);
       });
 
-      addEmgDataPoint({ value: numericValue, timestamp: newTimestamp });
+      addEmgDataPoint({
+        value: numericValue,
+        timestamp: newTimestamp,
+        formattedTime: formattedTimestamp,
+      });
     });
 
     return () => {
@@ -70,7 +81,7 @@ const EMGChart = () => {
       <S.MaxValue>Valor máximo atingido: {maxValue}</S.MaxValue>
       <ResponsiveContainer width="100%" height="100%">
         <LineChart width={500} height={300} data={chartData}>
-          <XAxis dataKey="timestamp" />
+          <XAxis dataKey="formattedTime" />
           <YAxis />
           <Line
             type="monotone"
