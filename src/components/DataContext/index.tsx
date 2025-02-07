@@ -9,6 +9,7 @@ import React, {
 export interface EMGDataPoint {
   value: number;
   timestamp: number;
+  formattedTime: string;
 }
 
 export interface WordEvent {
