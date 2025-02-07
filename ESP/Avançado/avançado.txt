@@ -1,0 +1,425 @@
+/*************************************************************
+ * Exemplo de Projeto Avançado no ESP32-S3
+ * 
+ * 1) Leitura de 2 sinais analógicos (pinos 38, 39) e 2 digitais (pinos 2, 3)
+ * 2) Taxa de 1 kHz (leitura a cada ~1 ms)
+ * 3) Oversampling no ADC para reduzir ruído
+ * 4) Pulso de sincronismo no pino 4 (saída)
+ * 5) Sincronização de hora via NTP (Internet)
+ * 6) Armazenamento no cartão SD (CSV) e log de erros em arquivo "error.log"
+ * 7) Envio dos dados via:
+ *    - WiFi (UDP)
+ *    - Bluetooth Serial
+ *    - WebSocket (servidor interno)
+ * 8) OTA (Over The Air) para atualizar sem cabo USB
+ * 9) Tratamento de erros com retentativas e log
+ *************************************************************/
+
+// Bibliotecas básicas de rede, ADC e SD
+#include <WiFi.h>             // Conexão WiFi
+#include <WiFiUdp.h>          // Envio de dados via UDP
+#include <BluetoothSerial.h>  // Bluetooth Serial (para dados em SPP)
+#include <SPI.h>              // Comunicações SPI (necessário para SD Card)
+#include <SD.h>               // Manipulação de arquivos no cartão SD
+#include "driver/adc.h"       // Controle avançado do ADC interno
+#include "esp_adc_cal.h"      // Calibração do ADC (não usamos diretamente aqui)
+#include <time.h>             // Para manipular horário (NTP)
+#include <ArduinoOTA.h>       // Para atualização Over The Air (OTA)
+
+// Bibliotecas para servidor WebSocket assíncrono
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+// ------------------------------
+// 1) DEFINIÇÕES DE PINOS E PARÂMETROS
+// ------------------------------
+#define ANALOG_PIN1   38       // Pino analógico 1 -> ADC1_CHANNEL_2
+#define ANALOG_PIN2   39       // Pino analógico 2 -> ADC1_CHANNEL_3
+#define DIGITAL_PIN1  2        // Pino digital 1 (entrada)
+#define DIGITAL_PIN2  3        // Pino digital 2 (entrada)
+#define SYNC_OUT_PIN  4        // Pino para pulso de sincronismo (saída)
+
+#define SAMPLE_RATE   1000     // Frequência de amostragem (1 kHz => 1 ms)
+#define WIFI_SSID     "YourWiFiSSID"       // Coloque o nome da sua rede
+#define WIFI_PASS     "YourWiFiPassword"   // Coloque a senha da sua rede
+#define UDP_IP        "192.168.1.100"      // IP do servidor/PC que receberá por UDP
+#define UDP_PORT      12345                // Porta do servidor UDP
+
+// Pino de Chip Select (CS) do SD Card (mude se necessário)
+#define SD_CS_PIN     5
+
+// Configurações NTP (servidor de horário)
+static const char* ntpServer = "pool.ntp.org";  
+static const long  gmtOffset_sec = 0;           // Ajuste conforme seu fuso (GMT offset)
+static const int   daylightOffset_sec = 0;      // Ajuste de horário de verão (se houver)
+
+// ------------------------------
+// 2) OBJETOS GLOBAIS
+// ------------------------------
+BluetoothSerial SerialBT;   // Objeto para comunicação Bluetooth
+WiFiUDP udp;                // Objeto para envio de pacotes UDP
+File logFile;               // Objeto para manipular arquivos no SD
+AsyncWebServer server(80);  // Servidor Web na porta 80
+AsyncWebSocket ws("/ws");   // Rota WebSocket em "/ws"
+
+// ------------------------------
+// 3) TRATAMENTO DE ERROS / LOG
+// Definimos níveis de log: INFO, WARN, ERROR
+// ------------------------------
+enum LogLevel {
+  LOG_INFO,
+  LOG_WARN,
+  LOG_ERROR
+};
+
+// ------------------------------
+// PROTÓTIPOS DE FUNÇÕES (declarações adiantadas)
+// ------------------------------
+void initLoggingSystem();    // Configura sistema de log
+void logMessage(LogLevel level, const String &msg); // Registra mensagens e erros
+bool initSDCard();           // Inicia cartão SD com retentativas
+bool initWiFi();             // Conecta ao WiFi
+bool initNTP(int maxAttempts = 5); // Sincroniza horário via NTP (com retentativas)
+void setupADC();             // Configura ADC (12 bits, atenuação 11dB)
+uint16_t readADC_Oversampled(adc1_channel_t channel); // Lê ADC com oversampling
+String getDateTimeString();  // Retorna string de data/hora ("YYYY-MM-DD HH:MM:SS")
+
+// ------------------------------
+// 4) SETUP
+// É executado ao iniciar o ESP32 (similar a "main" para Arduino)
+// ------------------------------
+void setup() {
+  Serial.begin(115200);      // Inicializa porta Serial a 115200 bps
+  delay(1000);               // Pequena espera para estabilizar
+
+  // Inicializa sistema de log (imprime no Serial, futuro log no SD se disponível)
+  initLoggingSystem();
+
+  // Define pinos como entrada ou saída
+  pinMode(DIGITAL_PIN1, INPUT_PULLUP);
+  pinMode(DIGITAL_PIN2, INPUT_PULLUP);
+  pinMode(SYNC_OUT_PIN, OUTPUT);
+  digitalWrite(SYNC_OUT_PIN, LOW);
+
+  // Tenta conectar no WiFi (com retentativas)
+  if (!initWiFi()) {
+    // Se falhar completamente, registramos em log e podemos continuar offline
+    logMessage(LOG_ERROR, "Falha definitiva ao conectar WiFi. Prosseguindo offline.");
+    // Dependendo do projeto, poderíamos travar ou reiniciar:
+    // while(true); // Parar aqui
+  }
+
+  // Tenta sincronizar horário via NTP
+  if (!initNTP(5)) {
+    // Se não conseguir, seguimos com data/hora = "NTP_ERROR"
+    logMessage(LOG_WARN, "Nao foi possivel sincronizar NTP. Timestamp usara NTP_ERROR.");
+  }
+
+  // Inicia comunicação Bluetooth
+  SerialBT.begin("ESP32-S3_BT");
+  logMessage(LOG_INFO, "Bluetooth inicializado.");
+
+  // Inicia cartão SD
+  if (!initSDCard()) {
+    logMessage(LOG_ERROR, "Continuando sem SDCard. Logs nao serao salvos em arquivo.");
+  } else {
+    logMessage(LOG_INFO, "SDCard OK.");
+  }
+
+  // Configura o ADC
+  setupADC();
+
+  // Configura OTA (Over The Air)
+  ArduinoOTA.setHostname("ESP32-S3_OTA"); // Nome que aparece na rede
+  ArduinoOTA.setPassword("123456");       // Senha para OTA (opcional, mas recomendado)
+  
+  // Callbacks informativos de OTA
+  ArduinoOTA.onStart([]() {
+    logMessage(LOG_INFO, "[OTA] Iniciando atualizacao...");
+  });
+  ArduinoOTA.onEnd([]() {
+    logMessage(LOG_INFO, "[OTA] Fim da atualizacao OTA.");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    // Mostra progresso
+    Serial.printf("[OTA] Progresso: %u%%\r\n", (progress * 100) / total);
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    // Em caso de falha
+    String err = "[OTA] Erro #: " + String(error);
+    logMessage(LOG_ERROR, err);
+  });
+  ArduinoOTA.begin();
+  logMessage(LOG_INFO, "OTA inicializado.");
+
+  // WebSocket e Servidor HTTP
+  ws.onEvent([](AsyncWebSocket *server, AsyncWebWebSocketClient *client,
+                AwsEventType type, void *arg, uint8_t *data, size_t len) {
+    // Callback para eventos do WebSocket
+    if (type == WS_EVT_CONNECT) {
+      // Cliente conectou
+      logMessage(LOG_INFO, "Novo cliente WebSocket conectado, ID=" + String(client->id()));
+      client->text("Bem-vindo ao WebSocket ESP32-S3!");
+    } else if (type == WS_EVT_DISCONNECT) {
+      // Cliente desconectou
+      logMessage(LOG_INFO, "Cliente WebSocket desconectado, ID=" + String(client->id()));
+    }
+    // Podemos tratar dados recebidos também (WS_EVT_DATA) se quisermos
+  });
+  // Adiciona a rota "/ws"
+  server.addHandler(&ws);
+
+  // Página simples em "/"
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    const char* htmlPage = R"rawliteral(
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8"/>
+        <title>ESP32 WebSocket</title>
+      </head>
+      <body>
+        <h1>Leitura em tempo real (WebSocket)</h1>
+        <div id="log"></div>
+        <script>
+          let ws = new WebSocket("ws://" + window.location.host + "/ws");
+          ws.onmessage = function(event) {
+            let div = document.getElementById('log');
+            div.innerHTML += event.data + "<br/>";
+          };
+        </script>
+      </body>
+      </html>
+    )rawliteral";
+    request->send(200, "text/html", htmlPage);
+  });
+
+  // Inicia servidor
+  server.begin();
+  logMessage(LOG_INFO, "Servidor WebSocket iniciado na porta 80.");
+
+  // Sinaliza fim do setup
+  logMessage(LOG_INFO, "Setup completo. Iniciando aquisicao a 1 kHz...");
+}
+
+// ------------------------------
+// 5) LOOP PRINCIPAL
+// Executa continuamente
+// Aqui fazemos a leitura a ~1ms e o envio dos dados
+// ------------------------------
+void loop() {
+  // Mantém servidor OTA ativo
+  ArduinoOTA.handle();
+
+  // A cada 1 ms (aprox. 1 kHz) lemos os sinais
+  static unsigned long lastSampleTime = 0;
+  if (millis() - lastSampleTime >= 1) {
+    lastSampleTime = millis();
+
+    // Lê valores analógicos com oversampling
+    uint16_t val1 = readADC_Oversampled(ADC1_CHANNEL_2); // pino 38
+    uint16_t val2 = readADC_Oversampled(ADC1_CHANNEL_3); // pino 39
+
+    // Lê valores digitais
+    uint8_t d1 = digitalRead(DIGITAL_PIN1);
+    uint8_t d2 = digitalRead(DIGITAL_PIN2);
+
+    // Gera pulso de sincronismo
+    digitalWrite(SYNC_OUT_PIN, HIGH);
+    digitalWrite(SYNC_OUT_PIN, LOW);
+
+    // Monta linha de dados no formato CSV: DataHora,Millis,ADC1,ADC2,Dig1,Dig2
+    String timeStamp = getDateTimeString(); // se falhar NTP, retorna "NTP_ERROR"
+    String dataLine = timeStamp + "," +
+                      String(millis()) + "," +
+                      String(val1) + "," +
+                      String(val2) + "," +
+                      String(d1)   + "," +
+                      String(d2)   + "\n";
+
+    // Envia via UDP
+    udp.beginPacket(UDP_IP, UDP_PORT);
+    udp.write(dataLine.c_str());
+    udp.endPacket();
+
+    // Envia via Bluetooth
+    if (SerialBT.hasClient()) {
+      SerialBT.print(dataLine);
+    }
+
+    // Envia via WebSocket (como texto)
+    ws.textAll(dataLine);
+
+    // Grava no SD (datalog.csv) - se estiver disponível
+    // (Tentamos re-inicializar o SD se já não estiver pronto,
+    // mas note que isso pode causar overhead.)
+    if (SD.begin(SD_CS_PIN)) {
+      File dataFile = SD.open("/datalog.csv", FILE_APPEND);
+      if (dataFile) {
+        dataFile.print(dataLine);
+        dataFile.close();
+      } else {
+        // Se falhar abrir o arquivo, registra como WARN
+        logMessage(LOG_WARN, "Falha ao abrir datalog.csv para escrita.");
+      }
+    }
+  }
+}
+
+// ------------------------------
+// 6) IMPLEMENTAÇÃO DAS FUNÇÕES AUXILIARES
+// ------------------------------
+
+/**
+ * initLoggingSystem():
+ * Inicializa o sistema de log.
+ * Aqui, apenas imprimimos algo no Serial, mas poderíamos
+ * configurar buffers ou outro recurso.
+ */
+void initLoggingSystem() {
+  Serial.println("[LOG] Sistema de log inicializado.");
+}
+
+/**
+ * logMessage(level, msg):
+ * Grava uma mensagem de log no Serial e, se possível, no arquivo "/error.log" no SD.
+ * Inclui timestamp (NTP se disponível) e nível (INFO, WARN, ERROR).
+ */
+void logMessage(LogLevel level, const String &msg) {
+  // Primeiro pegamos a data/hora
+  String dt = getDateTimeString(); // se NTP falhou, "NTP_ERROR"
+
+  // Mapeamos o enum para string
+  String prefix;
+  switch (level) {
+    case LOG_INFO: prefix = "INFO";  break;
+    case LOG_WARN: prefix = "WARN";  break;
+    case LOG_ERROR:prefix = "ERROR"; break;
+  }
+
+  // Formato final: "[YYYY-MM-DD HH:MM:SS][INFO] Mensagem..."
+  String logLine = "[" + dt + "][" + prefix + "] " + msg;
+
+  // Imprime no Serial
+  Serial.println(logLine);
+
+  // Tenta gravar em arquivo de erro (error.log) no SD
+  // Se SD estiver indisponível, simplesmente não grava
+  if (SD.begin(SD_CS_PIN)) {
+    File f = SD.open("/error.log", FILE_APPEND);
+    if (f) {
+      f.println(logLine);
+      f.close();
+    }
+  }
+}
+
+/**
+ * initSDCard():
+ * Faz 3 tentativas de iniciar o SD Card.
+ * Se conseguir, cria (ou anexa) o arquivo "datalog.csv" com cabeçalho.
+ */
+bool initSDCard() {
+  for (int i = 0; i < 3; i++) {
+    if (SD.begin(SD_CS_PIN)) {
+      // Se conseguir, grava uma mensagem de log
+      logMessage(LOG_INFO, "SDCard inicializado com sucesso.");
+
+      // Vamos criar/adicionar cabeçalho no "datalog.csv"
+      File dataFile = SD.open("/datalog.csv", FILE_APPEND);
+      if (dataFile) {
+        dataFile.println("DataHora,Millis,ADC1,ADC2,Dig1,Dig2");
+        dataFile.close();
+      }
+      return true;
+    }
+    delay(500);
+  }
+  return false;
+}
+
+/**
+ * initWiFi():
+ * Tenta conectar no WiFi por ~10 segundos.
+ * Se conseguir, retorna true, caso contrário, false.
+ */
+bool initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  logMessage(LOG_INFO, "Conectando ao WiFi...");
+  
+  unsigned long start = millis();
+  while ((millis() - start) < 10000) { // 10s
+    if (WiFi.status() == WL_CONNECTED) {
+      String s = "WiFi conectado. IP: " + WiFi.localIP().toString();
+      logMessage(LOG_INFO, s);
+      return true;
+    }
+    delay(500);
+  }
+  return false;
+}
+
+/**
+ * initNTP(maxAttempts):
+ * Configura NTP e faz "maxAttempts" tentativas para obter data/hora.
+ * Retorna true se obtiver sucesso.
+ */
+bool initNTP(int maxAttempts) {
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  struct tm timeinfo;
+  for (int i = 0; i < maxAttempts; i++) {
+    if (getLocalTime(&timeinfo)) {
+      // Conseguiu sincronizar
+      String dt = String("Tempo NTP sincronizado: ") + String(asctime(&timeinfo));
+      logMessage(LOG_INFO, dt);
+      return true;
+    }
+    // Ainda aguardando
+    logMessage(LOG_INFO, "Aguardando NTP...");
+    delay(1000);
+  }
+  return false;
+}
+
+/**
+ * setupADC():
+ * Configura o ADC para 12 bits e atenuação 11dB.
+ * 11dB permite medir até ~3.3V com range 0-4095.
+ */
+void setupADC() {
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_2, ADC_ATTEN_DB_11); // pino 38
+  adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11); // pino 39
+}
+
+/**
+ * readADC_Oversampled(channel):
+ * Faz 4 leituras do ADC e retorna a média (oversampling).
+ * Reduz ruído em relação a uma única leitura.
+ */
+uint16_t readADC_Oversampled(adc1_channel_t channel) {
+  uint32_t sum = 0;
+  for(int i = 0; i < 4; i++) {
+    sum += adc1_get_raw(channel);
+  }
+  return sum / 4;
+}
+
+/**
+ * getDateTimeString():
+ * Retorna a data/hora atual no formato "YYYY-MM-DD HH:MM:SS" (via NTP).
+ * Se falhar, retorna "NTP_ERROR".
+ */
+String getDateTimeString() {
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)) {
+    // Se não conseguiu NTP
+    return "NTP_ERROR";
+  }
+  // Formata data/hora
+  char buffer[25];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
+}

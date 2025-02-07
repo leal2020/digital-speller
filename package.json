@@ -53,6 +53,7 @@
     "react-dom": "^18.3.1",
     "recharts": "^2.12.7",
     "socket.io-client": "^4.7.5",
+    "speller": "file:",
     "styled-components": "^6.1.12"
   }
 }
